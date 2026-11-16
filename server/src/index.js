@@ -23,6 +23,7 @@ import observabilityRoutes from './routes/observabilityRoutes.js';
 import benchmarkRoutes from './routes/benchmarkRoutes.js';
 import corridorRoutes from './routes/corridorRoutes.js';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -41,9 +42,50 @@ if (config.nodeEnv !== 'test') {
   app.use(morgan('short'));
 }
 
-// Serve client dist build if present
+// Serve client dist build if present (standalone / Docker single-service mode)
 const clientDistPath = path.resolve(__dirname, '../../client/dist');
-app.use(express.static(clientDistPath));
+if (fs.existsSync(clientDistPath)) {
+  app.use(express.static(clientDistPath));
+}
+
+// Lazy single-flight initialization for Vercel serverless Express invocations
+let serverlessReadyPromise = null;
+async function ensureServerlessReady() {
+  if (!serverlessReadyPromise) {
+    serverlessReadyPromise = (async () => {
+      const configProblems = findProductionConfigProblems();
+      if (configProblems.length > 0) {
+        for (const problem of configProblems) console.error(`[Config] FATAL: ${problem}`);
+        throw new Error('Refusing to start in production with unsafe configuration.');
+      }
+      await connectDB();
+      try {
+        await ensureTelemetryRetention(Telemetry);
+      } catch (err) {
+        console.error(`[DB] Could not apply telemetry retention: ${err.message}`);
+      }
+      await seedInitialData();
+      if (!socketService.io) {
+        socketService.init(server, config.clientUrl);
+      }
+    })().catch((err) => {
+      serverlessReadyPromise = null;
+      throw err;
+    });
+  }
+  return serverlessReadyPromise;
+}
+
+if (process.env.VERCEL) {
+  app.use(async (req, res, next) => {
+    try {
+      await ensureServerlessReady();
+      next();
+    } catch (err) {
+      next(err);
+    }
+  });
+}
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
@@ -162,4 +204,5 @@ if (isMain) {
   startServer();
 }
 
+export default app;
 export { app, server, startServer };

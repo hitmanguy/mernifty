@@ -2,6 +2,7 @@ import express from 'express';
 import fs from 'fs';
 import path from 'path';
 import http from 'http';
+import https from 'https';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { io as ioClient } from 'socket.io-client';
@@ -68,15 +69,15 @@ function listBenchmarkRuns() {
   return { runs, hasLatestMarkdown };
 }
 
-function postLoopbackBatch(port, authHeader, payload) {
+function postLoopbackBatch(baseUrl, authHeader, payload) {
   return new Promise((resolve, reject) => {
+    const targetUrl = new URL('/api/telemetry/batch', baseUrl);
+    const transport = targetUrl.protocol === 'https:' ? https : http;
     const bodyStr = JSON.stringify(payload);
     const t0 = performance.now();
-    const req = http.request(
+    const req = transport.request(
+      targetUrl,
       {
-        hostname: '127.0.0.1',
-        port,
-        path: '/api/telemetry/batch',
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -128,10 +129,15 @@ router.post('/live', authenticate, requireRole(['admin']), async (req, res) => {
   }
 
   const addr = req.socket?.server?.address?.();
-  if (!addr || !addr.port) {
+  const hostHeader = req.headers['x-forwarded-host'] || req.headers.host;
+  const proto = String(req.headers['x-forwarded-proto'] || 'https').split(',')[0].trim();
+  const baseUrl =
+    process.env.SERVER_URL ||
+    (addr && addr.port ? `http://127.0.0.1:${addr.port}` : hostHeader ? `${proto}://${hostHeader}` : null);
+  if (!baseUrl) {
     return res.status(503).json({
       success: false,
-      error: 'HTTP server port unavailable for live loopback probe',
+      error: 'HTTP server target unavailable for live loopback probe',
     });
   }
 
@@ -145,8 +151,6 @@ router.post('/live', authenticate, requireRole(['admin']), async (req, res) => {
   let progressTimer = null;
 
   try {
-    const port = addr.port;
-    const baseUrl = `http://127.0.0.1:${port}`;
     const zones = ['south-bangalore', 'east-bangalore', 'north-bangalore', 'central-bangalore'];
 
     let deliveredFrames = 0;
@@ -248,7 +252,7 @@ router.post('/live', authenticate, requireRole(['admin']), async (req, res) => {
         seq += 50;
         const batch = makeBatchPayload({ batchSize: 50, runTag, startSeq: curSeq });
         try {
-          const r = await postLoopbackBatch(port, authHeader, batch);
+          const r = await postLoopbackBatch(baseUrl, authHeader, batch);
           rtts.push(r.rttMs);
           if (r.status === 202 || r.status === 200) {
             acceptedEvents += r.json?.acceptedCount ?? batch.length;

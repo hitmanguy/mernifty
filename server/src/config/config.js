@@ -26,9 +26,11 @@ export function findProductionConfigProblems(env = process.env) {
   return problems;
 }
 
+const vercelHost = process.env.VERCEL_PROJECT_PRODUCTION_URL || process.env.VERCEL_URL;
+
 export const config = {
   port: parseInt(process.env.PORT, 10) || 5000,
-  clientUrl: process.env.CLIENT_URL || 'http://localhost:5173',
+  clientUrl: process.env.CLIENT_URL || (vercelHost ? `https://${vercelHost}` : 'http://localhost:5173'),
   mongoUri: process.env.MONGODB_URI || 'mongodb://localhost:27017/metropulse',
   jwtSecret: process.env.JWT_SECRET || DEV_JWT_SECRET,
   nodeEnv: process.env.NODE_ENV || 'development',
