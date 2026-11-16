@@ -89,7 +89,8 @@ if (process.env.VERCEL) {
   });
 
   app.use(async (req, res, next) => {
-    if (req.method === 'GET' && SERVERLESS_DB_BYPASS_PATHS.has(req.path)) {
+    const hasCredentials = Boolean(req.headers.authorization || req.headers['x-api-key']);
+    if (!hasCredentials && req.method === 'GET' && SERVERLESS_DB_BYPASS_PATHS.has(req.path)) {
       return next();
     }
     try {

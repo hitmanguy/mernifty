@@ -11,10 +11,13 @@ import { io } from 'socket.io-client';
 import { playAlertSound } from '../utils/sound';
 import { useAuth } from './AuthContext';
 import {
+  DEFAULT_JUNCTIONS_META,
   DEFAULT_WIRE_SCHEMA,
   decodeZoneBatch,
   decodeJunctionBatch,
 } from '../shared/wire.js';
+
+const JUNCTION_META_BY_ID = new Map(DEFAULT_JUNCTIONS_META.map((m) => [m.junctionId, m]));
 
 const ALL_ZONES = [
   'south-bangalore',
@@ -336,13 +339,25 @@ export function SocketProvider({ children }) {
       setSocketError(null);
 
       const authHeaders = token ? { Authorization: `Bearer ${token}` } : {};
+      const fetchJsonWithPublicFallback = async (url) => {
+        try {
+          let r = await fetch(url, { headers: authHeaders });
+          if (r.status === 401 && token) {
+            r = await fetch(url);
+          }
+          return r.ok ? await r.json() : null;
+        } catch {
+          return null;
+        }
+      };
+
       const pollOnce = async () => {
         if (cancelled || isPausedRef.current) return;
         try {
           const [stRes, cfRes, alRes] = await Promise.all([
-            fetch('/api/sim/state', { headers: authHeaders }).then((r) => (r.ok ? r.json() : null)).catch(() => null),
-            fetch('/api/sim/counterfactual', { headers: authHeaders }).then((r) => (r.ok ? r.json() : null)).catch(() => null),
-            fetch('/api/alerts?limit=40', { headers: authHeaders }).then((r) => (r.ok ? r.json() : null)).catch(() => null),
+            fetchJsonWithPublicFallback('/api/sim/state'),
+            fetchJsonWithPublicFallback('/api/sim/counterfactual'),
+            fetchJsonWithPublicFallback('/api/alerts?limit=40'),
           ]);
           if (cancelled) return;
 
@@ -363,24 +378,34 @@ export function SocketProvider({ children }) {
 
           if (Array.isArray(stRes?.junctions) && stRes.junctions.length > 0) {
             httpSeq += 1;
-            const frames = stRes.junctions.map((j) => ({
-              junctionId: j.junctionId,
-              deviceId: j.junctionId,
-              deviceName: j.name,
-              zoneId: j.zoneId,
-              timestamp: stRes.simTime || new Date().toISOString(),
-              sequence: httpSeq,
-              status: j.status || 'normal',
-              data: {
-                approaches: j.approaches || [],
-                vehicleMix: j.vehicleMix || null,
-                control: j.control || null,
-                kpi: j.kpi || null,
-                congestionScore: j.congestionScore ?? 0,
-                maxQueueLengthM: j.maxQueueLengthM ?? 0,
-                avgSpeedKmph: j.avgSpeedKmph ?? 0,
-              },
-            }));
+            const frames = stRes.junctions.map((j) => {
+              const meta = JUNCTION_META_BY_ID.get(j.junctionId);
+              return {
+                junctionId: j.junctionId,
+                deviceId: j.junctionId,
+                deviceName: j.name || meta?.name || j.junctionId,
+                junctionName: j.name || meta?.name || j.junctionId,
+                zoneId: j.zoneId || meta?.zoneId,
+                location: j.location || meta?.location || null,
+                timestamp: stRes.simTime || new Date().toISOString(),
+                sequence: httpSeq,
+                status: j.status || 'normal',
+                metrics: {
+                  avgSpeedKmph: j.avgSpeedKmph ?? 0,
+                  maxQueueLengthM: j.maxQueueLengthM ?? 0,
+                  congestionScore: j.congestionScore ?? 0,
+                },
+                data: {
+                  approaches: j.approaches || [],
+                  vehicleMix: j.vehicleMix || null,
+                  control: j.control || null,
+                  kpi: j.kpi || null,
+                  congestionScore: j.congestionScore ?? 0,
+                  maxQueueLengthM: j.maxQueueLengthM ?? 0,
+                  avgSpeedKmph: j.avgSpeedKmph ?? 0,
+                },
+              };
+            });
             hotStore.applyBatch(frames);
           }
 

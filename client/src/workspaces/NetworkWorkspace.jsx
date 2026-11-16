@@ -29,6 +29,7 @@ import {
 import { StatusGlyph, StatusPill } from '../components/StatusPill';
 import { JunctionDetailView } from '../components/JunctionDetailView';
 import { getCorridorRoadWaypoints } from '../utils/roadWaypoints';
+import { DEFAULT_JUNCTIONS_META } from '../shared/wire.js';
 
 const BENGALURU_CENTER = [12.976, 77.622];
 const DEFAULT_ZOOM = 12;
@@ -410,16 +411,28 @@ export function NetworkWorkspace({
     });
   }, [activeCf]);
 
-  // Unified junction list combining devices + /api/sim/state + real-time socket frames
+  // Unified junction list combining canonical metadata + devices + /api/sim/state + real-time socket frames
   const mergedJunctions = useMemo(() => {
     const byId = new Map();
+    for (const meta of DEFAULT_JUNCTIONS_META) {
+      byId.set(meta.junctionId, {
+        junctionId: meta.junctionId,
+        deviceId: meta.junctionId,
+        name: meta.name,
+        zoneId: meta.zoneId,
+        location: meta.location,
+      });
+    }
     for (const d of devices || []) {
       const jId = d.junctionId || d.deviceId;
-      if (jId) byId.set(jId, { ...d, junctionId: jId, deviceId: jId });
+      if (jId) {
+        const prev = byId.get(jId) || {};
+        byId.set(jId, { ...prev, ...d, junctionId: jId, deviceId: jId, location: d.location || prev.location });
+      }
     }
     for (const sj of simState?.junctions || []) {
       const prev = byId.get(sj.junctionId) || {};
-      byId.set(sj.junctionId, { ...prev, ...sj, deviceId: sj.junctionId });
+      byId.set(sj.junctionId, { ...prev, ...sj, deviceId: sj.junctionId, location: sj.location || prev.location });
     }
     for (const [jId, live] of Object.entries(latestByDevice || {})) {
       const prev = byId.get(jId) || {};

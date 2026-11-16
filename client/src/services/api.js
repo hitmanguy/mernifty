@@ -22,7 +22,13 @@ export async function fetchJson(endpoint, options = {}) {
     headers['Authorization'] = `Bearer ${token}`;
   }
 
-  const response = await fetch(url, { ...options, headers });
+  let response = await fetch(url, { ...options, headers });
+  const method = String(options.method || 'GET').toUpperCase();
+  if (response.status === 401 && token && method === 'GET' && !endpoint.startsWith('/api/auth/me')) {
+    const retryHeaders = { ...headers };
+    delete retryHeaders['Authorization'];
+    response = await fetch(url, { ...options, headers: retryHeaders });
+  }
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}));
     const rawMsg = errorData.error || errorData.message || `${response.status} ${response.statusText}`;
