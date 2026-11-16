@@ -17,6 +17,7 @@ const router = express.Router();
 // Live simulation state, per-junction active controller specs, and study supervisory policy
 router.get('/state', publicReadOrAuth, (req, res) => {
   try {
+    simulatorService.stepServerlessIfDue();
     res.json({
       success: true,
       ...simulatorService.getState(),
@@ -26,9 +27,25 @@ router.get('/state', publicReadOrAuth, (req, res) => {
   }
 });
 
+// Combined single-round-trip snapshot for HTTP polling mode (serverless fallback)
+router.get('/live-snapshot', publicReadOrAuth, (req, res) => {
+  try {
+    simulatorService.stepServerlessIfDue();
+    res.json({
+      success: true,
+      serverTimestamp: Date.now(),
+      state: simulatorService.getState(),
+      counterfactual: simulatorService.getCounterfactual(),
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // Paired CRN counterfactual comparison between Live Twin and Fixed-TOD Baseline Twin
 router.get('/counterfactual', publicReadOrAuth, (req, res) => {
   try {
+    simulatorService.stepServerlessIfDue();
     res.json({
       success: true,
       ...simulatorService.getCounterfactual(),

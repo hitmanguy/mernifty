@@ -176,6 +176,7 @@ export function SocketProvider({ children }) {
   const [benchProgress, setBenchProgress] = useState(null);
   const [schema, setSchema] = useState(DEFAULT_WIRE_SCHEMA);
   const [simMeta, setSimMeta] = useState(null);
+  const [liveSimState, setLiveSimState] = useState(null);
   const [lastReplayStats, setLastReplayStats] = useState(null);
   const [socketError, setSocketError] = useState(null);
   const [disconnectCountdownSec, setDisconnectCountdownSec] = useState(0);
@@ -351,15 +352,20 @@ export function SocketProvider({ children }) {
         }
       };
 
+      let pollCount = 0;
       const pollOnce = async () => {
         if (cancelled || isPausedRef.current) return;
+        const currentPoll = pollCount++;
         try {
-          const [stRes, cfRes, alRes] = await Promise.all([
-            fetchJsonWithPublicFallback('/api/sim/state'),
-            fetchJsonWithPublicFallback('/api/sim/counterfactual'),
-            fetchJsonWithPublicFallback('/api/alerts?limit=40'),
-          ]);
+          const t0 = performance.now();
+          const snapRes = await fetchJsonWithPublicFallback('/api/sim/live-snapshot');
+          const rttMs = Math.max(1, Math.round(performance.now() - t0));
           if (cancelled) return;
+
+          setClientLatency(rttMs);
+
+          const stRes = snapRes?.state || null;
+          const cfRes = snapRes?.counterfactual || null;
 
           if (stRes?.simClockIst || stRes?.scenario || stRes?.simSpeed) {
             setSimMeta((prev) => ({
@@ -377,6 +383,7 @@ export function SocketProvider({ children }) {
           }
 
           if (Array.isArray(stRes?.junctions) && stRes.junctions.length > 0) {
+            setLiveSimState(stRes);
             httpSeq += 1;
             const frames = stRes.junctions.map((j) => {
               const meta = JUNCTION_META_BY_ID.get(j.junctionId);
@@ -409,11 +416,15 @@ export function SocketProvider({ children }) {
             hotStore.applyBatch(frames);
           }
 
-          if (cfRes?.summary || cfRes?.deltas) {
+          if (cfRes && ((cfRes.live && cfRes.baseline) || cfRes.summary || cfRes.deltas)) {
             setCounterfactual(cfRes);
           }
-          if (Array.isArray(alRes?.alerts)) {
-            setAlerts(alRes.alerts);
+
+          if (currentPoll % 6 === 0) {
+            const alRes = await fetchJsonWithPublicFallback('/api/alerts?limit=40');
+            if (!cancelled && Array.isArray(alRes?.alerts)) {
+              setAlerts(alRes.alerts);
+            }
           }
         } catch {
           // ignore transient poll failures
@@ -421,7 +432,7 @@ export function SocketProvider({ children }) {
       };
 
       pollOnce();
-      httpPollInterval = setInterval(pollOnce, 4000);
+      httpPollInterval = setInterval(pollOnce, 1200);
     };
 
     const connectSocketIo = () => {
@@ -787,6 +798,7 @@ export function SocketProvider({ children }) {
         schema,
         simMeta,
         setSimMeta,
+        liveSimState,
         lastReplayStats,
         socketError,
         setSocketError,

@@ -192,6 +192,7 @@ export function NetworkWorkspace({
     stats,
     simMeta,
     setSimMeta,
+    liveSimState,
     activeCorridorTrip,
     corridorGiveway,
     corridorOfficerAlert,
@@ -259,10 +260,17 @@ export function NetworkWorkspace({
   }, []);
 
   useEffect(() => {
+    if (liveSimState?.junctions) {
+      setSimState(liveSimState);
+    }
+  }, [liveSimState]);
+
+  useEffect(() => {
+    if (liveSimState?.junctions) return undefined;
     fetchSimOverview();
     const t = setInterval(fetchSimOverview, 3000);
     return () => clearInterval(t);
-  }, [fetchSimOverview]);
+  }, [fetchSimOverview, liveSimState]);
 
   useEffect(() => {
     let alive = true;

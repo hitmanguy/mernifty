@@ -53,6 +53,7 @@ let serverlessReadyPromise = null;
 const SERVERLESS_DB_BYPASS_PATHS = new Set([
   '/api/health',
   '/api/sim/state',
+  '/api/sim/live-snapshot',
   '/api/sim/scenarios',
   '/api/sim/counterfactual',
 ]);

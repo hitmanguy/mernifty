@@ -214,6 +214,7 @@ class SimulatorService {
     this._nextPhysicsAt = 0;
     this._nextEmitAt = 0;
     this._lastCfBroadcastElapsed = -1;
+    this._lastServerlessStepAt = Date.now();
 
     this.sequenceMap = new Map();
     this.queueHistory = new Map(); // junctionId -> [{ elapsedSec, totalQueueVeh, maxQueueLengthM, avgSpeedKmph, maxVOverC }]
@@ -1237,6 +1238,22 @@ class SimulatorService {
       weatherActive: this.pair.live.weather.active,
       sequences: Object.fromEntries(this.sequenceMap),
     };
+  }
+
+  stepServerlessIfDue() {
+    if (!process.env.VERCEL || this.isRunning) return;
+    const now = Date.now();
+    const elapsedMs = now - (this._lastServerlessStepAt || now);
+    if (elapsedMs < 350) return;
+    this._lastServerlessStepAt = now;
+    const steps = Math.min(25, Math.max(1, Math.round((elapsedMs / 1000) * this.simSpeed)));
+    for (let i = 0; i < steps; i++) {
+      this.pair.step();
+      this._processScheduledTasks();
+      if (i % 5 === 4 || i === steps - 1) {
+        this._recordQueueHistoryPoint();
+      }
+    }
   }
 
   getState() {
