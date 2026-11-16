@@ -50,6 +50,13 @@ if (fs.existsSync(clientDistPath)) {
 
 // Lazy single-flight initialization for Vercel serverless Express invocations
 let serverlessReadyPromise = null;
+const SERVERLESS_DB_BYPASS_PATHS = new Set([
+  '/api/health',
+  '/api/sim/state',
+  '/api/sim/scenarios',
+  '/api/sim/counterfactual',
+]);
+
 async function ensureServerlessReady() {
   if (!serverlessReadyPromise) {
     serverlessReadyPromise = (async () => {
@@ -59,15 +66,11 @@ async function ensureServerlessReady() {
         throw new Error('Refusing to start in production with unsafe configuration.');
       }
       await connectDB();
-      try {
-        await ensureTelemetryRetention(Telemetry);
-      } catch (err) {
-        console.error(`[DB] Could not apply telemetry retention: ${err.message}`);
-      }
       await seedInitialData();
-      if (!socketService.io) {
-        socketService.init(server, config.clientUrl);
-      }
+      // Keep TTL retention check non-blocking on cold starts so initial requests respond immediately
+      ensureTelemetryRetention(Telemetry).catch((err) => {
+        console.error(`[DB] Could not apply telemetry retention: ${err.message}`);
+      });
     })().catch((err) => {
       serverlessReadyPromise = null;
       throw err;
@@ -77,7 +80,18 @@ async function ensureServerlessReady() {
 }
 
 if (process.env.VERCEL) {
+  app.all('/socket.io*', (req, res) => {
+    res.status(503).json({
+      success: false,
+      code: 'WS_UNAVAILABLE',
+      error: 'WebSocket transport is unavailable in serverless Express mode; use HTTP polling fallback.',
+    });
+  });
+
   app.use(async (req, res, next) => {
+    if (req.method === 'GET' && SERVERLESS_DB_BYPASS_PATHS.has(req.path)) {
+      return next();
+    }
     try {
       await ensureServerlessReady();
       next();
@@ -96,6 +110,7 @@ app.get('/api/health', (req, res) => {
     environment: config.nodeEnv,
     database: getDatabaseInfo(),
     demoPersonas: config.demoPersonas,
+    websocketSupported: !process.env.VERCEL,
   });
 });
 

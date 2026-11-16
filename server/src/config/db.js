@@ -14,10 +14,15 @@ export function getDatabaseInfo() {
 }
 
 export async function connectDB() {
+  if (mongoose.connection.readyState === 1) {
+    if (databaseType === 'disconnected') databaseType = 'external';
+    return;
+  }
+
   // Option 1: Try connecting to configured MONGODB_URI
   try {
-    const safeUri = config.mongoUri.replace(/:\/\/([^:@]+):([^@]+)@/, '://$1:***@');
-    console.log(`[DB] Attempting connection to MongoDB at: ${safeUri}...`);
+    const dbTargetKind = /^mongodb\+srv:/i.test(config.mongoUri) ? 'Atlas' : 'local/external';
+    console.log(`[DB] Connecting to MongoDB (${dbTargetKind})...`);
     await mongoose.connect(config.mongoUri, {
       serverSelectionTimeoutMS: 3000,
       connectTimeoutMS: 3000,

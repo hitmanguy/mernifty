@@ -88,37 +88,52 @@ export async function cleanupLegacySeededAuth() {
 
 export async function seedInitialData() {
   try {
+    // Fast-path: once seeded, skip multi-step upserts & user checks so serverless cold starts stay <100ms
+    const [devCount, adminExists, activeKeyExists] = await Promise.all([
+      Device.estimatedDocumentCount(),
+      User.exists({ email: 'admin@metropulse.io' }),
+      DeviceKey.exists({ active: true }),
+    ]);
+    if (devCount >= INITIAL_DEVICES.length && adminExists && activeKeyExists) {
+      return;
+    }
+
     await cleanupLegacySeededAuth();
 
-    // 1. Clean up legacy non-traffic devices & seed 12 BLR junctions
+    // 1. Clean up legacy non-traffic devices & bulk-upsert 12 BLR junctions in a single round-trip
     const trafficIds = INITIAL_DEVICES.map((d) => d.deviceId);
-    await Device.deleteMany({ deviceId: { $nin: trafficIds } });
-
-    for (const dev of INITIAL_DEVICES) {
-      await Device.findOneAndUpdate(
-        { deviceId: dev.deviceId },
-        {
-          $set: {
-            junctionId: dev.junctionId,
-            name: dev.name,
-            zoneId: dev.zoneId,
-            zoneName: dev.zoneName,
-            category: dev.category,
-            region: dev.region,
-            status: 'online',
-            healthScore: 100,
-            lastSeen: new Date(),
-            lastLocation: dev.location,
-            vehicleMix: dev.vehicleMix,
-            tags: [dev.zoneId, 'bengaluru-traffic', 'smart-signal'],
+    const now = new Date();
+    await Promise.all([
+      Device.deleteMany({ deviceId: { $nin: trafficIds } }),
+      Device.bulkWrite(
+        INITIAL_DEVICES.map((dev) => ({
+          updateOne: {
+            filter: { deviceId: dev.deviceId },
+            update: {
+              $set: {
+                junctionId: dev.junctionId,
+                name: dev.name,
+                zoneId: dev.zoneId,
+                zoneName: dev.zoneName,
+                category: dev.category,
+                region: dev.region,
+                status: 'online',
+                healthScore: 100,
+                lastSeen: now,
+                lastLocation: dev.location,
+                vehicleMix: dev.vehicleMix,
+                tags: [dev.zoneId, 'bengaluru-traffic', 'smart-signal'],
+              },
+            },
+            upsert: true,
           },
-        },
-        { upsert: true }
-      );
-    }
+        })),
+        { ordered: false }
+      ),
+    ]);
     console.log(`[Seed] Seeded / verified ${INITIAL_DEVICES.length} Bengaluru Smart City Traffic Junctions.`);
 
-    // 2. Seed RBAC Demo / Operator Users (passwords read from env or generated once randomly)
+    // 2. Seed RBAC Demo / Operator Users (parallel & E11000-safe across concurrent cold starts)
     const userSpecs = [
       {
         email: 'admin@metropulse.io',
@@ -152,51 +167,67 @@ export async function seedInitialData() {
       },
     ];
 
-    for (const spec of userSpecs) {
-      const existing = await User.findOne({ email: spec.email });
-      if (!existing) {
-        const { password, generated } = resolvePassword(spec.envKey, spec.fallbackEnvKey);
-        await User.create({
-          name: spec.name,
-          email: spec.email,
-          password,
-          role: spec.role,
-          zones: spec.zones,
-        });
-        if (generated) {
-          console.log(`[Seed] Created user ${spec.email} (role=${spec.role}) with generated password: ${password}`);
-        } else {
-          console.log(`[Seed] Created user ${spec.email} (role=${spec.role}, zones=[${spec.zones.join(',')}])`);
+    await Promise.all(
+      userSpecs.map(async (spec) => {
+        const existing = await User.findOne({ email: spec.email });
+        if (!existing) {
+          const { password, generated } = resolvePassword(spec.envKey, spec.fallbackEnvKey);
+          try {
+            await User.create({
+              name: spec.name,
+              email: spec.email,
+              password,
+              role: spec.role,
+              zones: spec.zones,
+            });
+            if (generated && !process.env.VERCEL) {
+              console.log(`[Seed] Created user ${spec.email} (role=${spec.role}) with generated password: ${password}`);
+            } else {
+              console.log(`[Seed] Created user ${spec.email} (role=${spec.role}, zones=[${spec.zones.join(',')}])`);
+            }
+          } catch (createErr) {
+            if (createErr?.code !== 11000) throw createErr;
+          }
+        } else if (!existing.zones || existing.zones.length === 0) {
+          if (spec.zones.length > 0) {
+            existing.zones = spec.zones;
+            await existing.save();
+          }
         }
-      } else if (!existing.zones || existing.zones.length === 0) {
-        if (spec.zones.length > 0) {
-          existing.zones = spec.zones;
-          await existing.save();
-        }
-      }
-    }
+      })
+    );
 
-    // 3. Seed DeviceKey (SHA-256 hashed in DB; print plaintext & write server/.env.local-keys ONCE)
+    // 3. Seed DeviceKey (SHA-256 hashed in DB; skip read-only filesystem writes on Vercel)
     const activeKeysCount = await DeviceKey.countDocuments({ active: true });
     if (activeKeysCount === 0) {
+      const keyFromEnv = Boolean(process.env.METROPULSE_API_KEY);
       const rawKey =
         process.env.METROPULSE_API_KEY || `mpk_${crypto.randomBytes(24).toString('hex')}`;
-      await DeviceKey.create({
-        keyHash: hashDeviceKey(rawKey),
-        prefix: rawKey.slice(0, 12),
-        label: 'Bengaluru Primary Camera Telemetry Producer',
-        scopes: ['ingest', 'read'],
-        allowedJunctionIds: [],
-        active: true,
-      });
-
       try {
-        fs.writeFileSync(LOCAL_KEYS_PATH, `METROPULSE_API_KEY=${rawKey}\n`, { mode: 0o600 });
-        console.log(`[Seed] Generated DeviceKey (prefix=${rawKey.slice(0, 12)}). Saved to server/.env.local-keys.`);
-      } catch (fsErr) {
-        console.warn('[Seed] Could not write server/.env.local-keys:', fsErr.message);
+        await DeviceKey.create({
+          keyHash: hashDeviceKey(rawKey),
+          prefix: rawKey.slice(0, 12),
+          label: 'Bengaluru Primary Camera Telemetry Producer',
+          scopes: ['ingest', 'read'],
+          allowedJunctionIds: [],
+          active: true,
+        });
+      } catch (dkErr) {
+        if (dkErr?.code === 11000) return;
+        throw dkErr;
       }
-      console.log(`[Seed] ONE-TIME Device API Key (METROPULSE_API_KEY): ${rawKey}`);
+
+      if (keyFromEnv || process.env.VERCEL) {
+        console.log(`[Seed] Registered DeviceKey (prefix=${rawKey.slice(0, 12)}).`);
+      } else {
+        try {
+          fs.writeFileSync(LOCAL_KEYS_PATH, `METROPULSE_API_KEY=${rawKey}\n`, { mode: 0o600 });
+          console.log(`[Seed] Generated DeviceKey (prefix=${rawKey.slice(0, 12)}). Saved to server/.env.local-keys.`);
+        } catch (fsErr) {
+          console.warn('[Seed] Could not write server/.env.local-keys:', fsErr.message);
+        }
+        console.log(`[Seed] ONE-TIME Device API Key (METROPULSE_API_KEY): ${rawKey}`);
+      }
     }
   } catch (err) {
     console.warn('[Seed] Warning during data seed:', err.message);

@@ -162,8 +162,25 @@ function DeskSocketCard({ spec }) {
 
       if (!mounted) return;
 
+      const health = await fetch('/api/health')
+        .then((r) => (r.ok ? r.json() : null))
+        .catch(() => null);
+      if (!mounted) return;
+
+      if (health && health.websocketSupported === false) {
+        setState((prev) => ({
+          ...prev,
+          authUser: user,
+          authNote: note || 'HTTP live-sync mode (WebSocket disabled in serverless host)',
+          connected: false,
+          socketId: '',
+        }));
+        return;
+      }
+
       sock = io({
         transports: ['websocket', 'polling'],
+        reconnectionAttempts: 5,
         forceNew: true,
         multiplex: false,
         auth: token ? { token } : {},

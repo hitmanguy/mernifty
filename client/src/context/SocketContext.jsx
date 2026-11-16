@@ -262,16 +262,14 @@ export function SocketProvider({ children }) {
       setDisconnectCountdownSec(0);
     }
 
-    const socket = io({
-      transports: ['websocket', 'polling'],
-      reconnectionAttempts: 20,
-      reconnectionDelay: 1000,
-      auth: token ? { token } : {},
-    });
-    socketRef.current = socket;
-
+    let cancelled = false;
+    let socket = null;
     let flushTimerId = null;
     let rafId = null;
+    let pingInterval = null;
+    let latencyReportInterval = null;
+    let httpPollInterval = null;
+    let httpSeq = 0;
     const FLUSH_COALESCE_MS = 10;
 
     const flushPendingBatch = () => {
@@ -332,6 +330,86 @@ export function SocketProvider({ children }) {
       }
     };
 
+    const startHttpPollingFallback = () => {
+      if (httpPollInterval || cancelled) return;
+      setIsConnected(true);
+      setSocketError(null);
+
+      const authHeaders = token ? { Authorization: `Bearer ${token}` } : {};
+      const pollOnce = async () => {
+        if (cancelled || isPausedRef.current) return;
+        try {
+          const [stRes, cfRes, alRes] = await Promise.all([
+            fetch('/api/sim/state', { headers: authHeaders }).then((r) => (r.ok ? r.json() : null)).catch(() => null),
+            fetch('/api/sim/counterfactual', { headers: authHeaders }).then((r) => (r.ok ? r.json() : null)).catch(() => null),
+            fetch('/api/alerts?limit=40', { headers: authHeaders }).then((r) => (r.ok ? r.json() : null)).catch(() => null),
+          ]);
+          if (cancelled) return;
+
+          if (stRes?.simClockIst || stRes?.scenario || stRes?.simSpeed) {
+            setSimMeta((prev) => ({
+              ...(prev || {}),
+              simClockIst: stRes.simClockIst || prev?.simClockIst || null,
+              simTime: stRes.simTime || prev?.simTime || null,
+              todPeriod: stRes.todPeriod || prev?.todPeriod || null,
+              simSpeed: stRes.simSpeed || prev?.simSpeed || 1,
+              scenario: stRes.scenario ?? prev?.scenario ?? null,
+              scenarioLabel: stRes.scenarioLabel ?? prev?.scenarioLabel ?? null,
+              simStartNote: stRes.simStartNote ?? prev?.simStartNote ?? null,
+              running: stRes.running ?? stRes.isRunning ?? prev?.running ?? true,
+              demandScale: stRes.demandScale ?? prev?.demandScale ?? 1,
+            }));
+          }
+
+          if (Array.isArray(stRes?.junctions) && stRes.junctions.length > 0) {
+            httpSeq += 1;
+            const frames = stRes.junctions.map((j) => ({
+              junctionId: j.junctionId,
+              deviceId: j.junctionId,
+              deviceName: j.name,
+              zoneId: j.zoneId,
+              timestamp: stRes.simTime || new Date().toISOString(),
+              sequence: httpSeq,
+              status: j.status || 'normal',
+              data: {
+                approaches: j.approaches || [],
+                vehicleMix: j.vehicleMix || null,
+                control: j.control || null,
+                kpi: j.kpi || null,
+                congestionScore: j.congestionScore ?? 0,
+                maxQueueLengthM: j.maxQueueLengthM ?? 0,
+                avgSpeedKmph: j.avgSpeedKmph ?? 0,
+              },
+            }));
+            hotStore.applyBatch(frames);
+          }
+
+          if (cfRes?.summary || cfRes?.deltas) {
+            setCounterfactual(cfRes);
+          }
+          if (Array.isArray(alRes?.alerts)) {
+            setAlerts(alRes.alerts);
+          }
+        } catch {
+          // ignore transient poll failures
+        }
+      };
+
+      pollOnce();
+      httpPollInterval = setInterval(pollOnce, 4000);
+    };
+
+    const connectSocketIo = () => {
+      if (cancelled) return;
+      let connectFailures = 0;
+      socket = io({
+        transports: ['websocket', 'polling'],
+        reconnectionAttempts: 5,
+        reconnectionDelay: 1000,
+        auth: token ? { token } : {},
+      });
+      socketRef.current = socket;
+
     socket.on('connect', () => {
       setIsConnected(true);
       setSocketError(null);
@@ -364,6 +442,12 @@ export function SocketProvider({ children }) {
     });
 
     socket.on('connect_error', (err) => {
+      connectFailures += 1;
+      if (connectFailures >= 3) {
+        socket.disconnect();
+        startHttpPollingFallback();
+        return;
+      }
       setSocketError(err?.message || 'Socket connection failed');
     });
 
@@ -488,7 +572,7 @@ export function SocketProvider({ children }) {
       setPreemptedJunctions(new Set());
     });
 
-    const pingInterval = setInterval(() => {
+    pingInterval = setInterval(() => {
       if (socket.connected) {
         socket.emit('telemetry:ping', Date.now());
       }
@@ -522,7 +606,7 @@ export function SocketProvider({ children }) {
       return Number(sorted[idx].toFixed(2));
     };
 
-    const latencyReportInterval = setInterval(() => {
+    latencyReportInterval = setInterval(() => {
       const samples = e2eSamplesRef.current.splice(0, e2eSamplesRef.current.length);
       if (!socket.connected || samples.length === 0) return;
       const sorted = [...samples].sort((a, b) => a - b);
@@ -544,17 +628,34 @@ export function SocketProvider({ children }) {
       });
       socket.emit('client:latency', summary);
     }, 5000);
+    };
+
+    fetch('/api/health')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((health) => {
+        if (cancelled) return;
+        if (health && health.websocketSupported === false) {
+          startHttpPollingFallback();
+        } else {
+          connectSocketIo();
+        }
+      })
+      .catch(() => {
+        if (!cancelled) connectSocketIo();
+      });
 
     return () => {
-      clearInterval(pingInterval);
-      clearInterval(latencyReportInterval);
+      cancelled = true;
+      if (pingInterval) clearInterval(pingInterval);
+      if (latencyReportInterval) clearInterval(latencyReportInterval);
+      if (httpPollInterval) clearInterval(httpPollInterval);
       if (flushTimerId !== null) {
         clearTimeout(flushTimerId);
       }
       if (rafId !== null && typeof window !== 'undefined' && typeof window.cancelAnimationFrame === 'function') {
         window.cancelAnimationFrame(rafId);
       }
-      socket.disconnect();
+      if (socket) socket.disconnect();
     };
   }, [token, sendActiveSubscription]);
 
